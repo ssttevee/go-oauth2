@@ -58,6 +58,37 @@ func DefaultTokenSource(ctx context.Context, scope ...string) (oauth2.TokenSourc
 	return creds.TokenSource, nil
 }
 
+// DefaultJWTAccessTokenSource searches for "Application Default Credentials" (see FindDefaultCredentials()).
+func DefaultJWTAccessTokenSource(ctx context.Context, audience string) (oauth2.TokenSource, error) {
+	// First, try the environment variable.
+	const envVar = "GOOGLE_APPLICATION_CREDENTIALS"
+	if filename := os.Getenv(envVar); filename != "" {
+		ts, err := readJWTAccessTokenSourceFromFile(filename, audience)
+		if err != nil {
+			return nil, fmt.Errorf("google: error getting credentials using %v environment variable: %v", envVar, err)
+		}
+		return ts, nil
+	}
+
+	// Second, try a well-known file.
+	filename := wellKnownFile()
+	if ts, err := readJWTAccessTokenSourceFromFile(filename, audience); err == nil {
+		return ts, nil
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("google: error getting credentials using well-known file (%v): %v", filename, err)
+	}
+
+	// Lastly, if we're on Google Compute Engine, an App Engine standard second generation runtime,
+	// or App Engine flexible, use the metadata server.
+	if metadata.OnGCE() {
+		return ComputeJWTAccessTokenSource("", audience), nil
+	}
+
+	// None are found; return helpful error.
+	const url = "https://developers.google.com/accounts/docs/application-default-credentials"
+	return nil, fmt.Errorf("google: could not find default credentials. See %v for more information.", url)
+}
+
 // FindDefaultCredentials searches for "Application Default Credentials".
 //
 // It looks for credentials in the following places,
@@ -143,6 +174,14 @@ func wellKnownFile() string {
 		return filepath.Join(os.Getenv("APPDATA"), "gcloud", f)
 	}
 	return filepath.Join(guessUnixHomeDir(), ".config", "gcloud", f)
+}
+
+func readJWTAccessTokenSourceFromFile(filename string, audience string) (oauth2.TokenSource, error) {
+	b, err := ioutil.ReadFile(filename)
+	if err != nil {
+		return nil, err
+	}
+	return JWTAccessTokenSourceFromJSON(b, audience)
 }
 
 func readCredentialsFile(ctx context.Context, filename string, scopes []string) (*DefaultCredentials, error) {

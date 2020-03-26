@@ -6,9 +6,12 @@ package google
 
 import (
 	"crypto/rsa"
+	"errors"
 	"fmt"
+	"net/url"
 	"time"
 
+	"cloud.google.com/go/compute/metadata"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/internal"
 	"golang.org/x/oauth2/jws"
@@ -71,4 +74,38 @@ func (ts *jwtAccessTokenSource) Token() (*oauth2.Token, error) {
 		return nil, fmt.Errorf("google: could not encode JWT: %v", err)
 	}
 	return &oauth2.Token{AccessToken: msg, TokenType: "Bearer", Expiry: exp}, nil
+}
+
+type computeJWTAccessTokenSource struct {
+	account, audience string
+}
+
+func ComputeJWTAccessTokenSource(account string, audience string) oauth2.TokenSource {
+	return oauth2.ReuseTokenSource(nil, computeJWTAccessTokenSource{account: account, audience: audience})
+}
+
+func (ts computeJWTAccessTokenSource) Token() (*oauth2.Token, error) {
+	if !metadata.OnGCE() {
+		return nil, errors.New("oauth2/google: can't get a token from the metadata service; not running on GCE")
+	}
+	acct := ts.account
+	if acct == "" {
+		acct = "default"
+	}
+	t, err := metadata.Get("instance/service-accounts/" + acct + "/identity?audience=" + url.QueryEscape(ts.audience))
+	if err != nil {
+		return nil, err
+	}
+	cs, err := jws.Decode(t)
+	if err != nil {
+		return nil, err
+	}
+	return (&oauth2.Token{
+		AccessToken: t,
+		TokenType:   "Bearer",
+		Expiry:      time.Unix(cs.Exp, 0),
+	}).WithExtra(map[string]interface{}{
+		"oauth2.google.tokenSource":    "compute-metadata",
+		"oauth2.google.serviceAccount": acct,
+	}), nil
 }
